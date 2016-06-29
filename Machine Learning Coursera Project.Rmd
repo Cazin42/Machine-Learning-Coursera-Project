@@ -1,0 +1,184 @@
+---
+title: "Machine Learning Coursera Project"
+author: "Olivier Cazin"
+date: "26 juin 2016"
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. 
+They were asked to perform barbell lifts correctly and incorrectly in 5 different ways :
+- Class A: exactly according to the specification
+- Class B: throwing the elbows to the front
+- Class C: lifting the dumbbell only halfway
+- Class D: lowering the dumbbell only halfway
+- Class E: throwing the hips to the front
+More information is available from the website here: (http://groupware.les.inf.puc-rio.br/har) 
+
+The data for this project come from this source: [Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013] (http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)
+
+The goal of our project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. 
+
+## 1. Loading R packages 
+
+At first, useful R packages are loaded.
+
+```{r, message=FALSE, results="hide", warning=FALSE}
+require(caret)
+require(dplyr)
+require(FactoMineR)
+require(factoextra)
+require(ggplot2)
+require(randomForest)
+require(rpart)
+require(rpart.plot)
+```
+
+## 2. Importing files 
+
+Then, training/test and validation files are imported and we display the structure of these files (arbitrarily, we consider the 20 test cases as a validation dataset and the other as a training and test dataset)      
+
+```{r, message=FALSE, results="hide",warning=FALSE}
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+data.train <- read.csv(url(trainUrl), na.strings=c("NA","","#DIV/0!"))
+data.validation <- read.csv(url(testUrl), na.strings=c("NA","","#DIV/0!"))
+str(data.train,list.len=ncol(data.train))
+str(data.validation,list.len=ncol(data.validation))
+```
+
+## 3. Inspecting, cleaning et preparing data
+
+The 7th variables are removed because they are not relevant to accelerometer measurements.
+Only arm, belt, dumbbell, and forearm features without missing values in test files could be predictors.
+
+```{r, message=FALSE, results="hide", warning=FALSE}
+# Inspecting train et validation dataset
+summary(data.train)
+summary(data.validation)
+# Removing the 7th columns which are not relevant to accelerometer measurements
+data.train.cleaned <- data.train[,-seq(1:7)]
+data.validation.cleaned <- data.validation[,-seq(1:7)]
+# Removing columns with NA missing values
+na.test <-  function (x) {
+  w <- sapply(x, function(x)all(is.na(x)))
+  }
+na.test.results <- na.test(data.validation.cleaned)
+data.validation.cleaned <- data.validation.cleaned[,!na.test.results]
+data.train.cleaned <- data.train.cleaned[,!na.test.results]
+```
+
+
+## 4. Creating training and test dataset 
+
+Now, we consider cross-validation and create train and test datasets
+
+```{r, message=FALSE, results="hide", warning=FALSE}
+set.seed(200)
+inTrain <- createDataPartition(data.train.cleaned$classe, p=0.70, list=F)
+train <- data.train.cleaned[inTrain, ]
+test <- data.train.cleaned[-inTrain, ]
+```
+
+
+## 5. Short Data Exploratory Analysis
+
+All variables are quantitative, so in a 1st approach we could opt for a Principal Component Analysis (PCA) which could be particulary useful for data reduction and if there's a relative linear correlations between factors. 
+
+```{r, message=FALSE, results="hide", warning=FALSE}
+# Principal Component Analysis
+res <- PCA(data.train.cleaned[,c(1:52)],scale.unit=TRUE,graph=FALSE)
+res <- PCA(data.train.cleaned,quali.sup=53,graph=FALSE)
+# Decrease of eigenvalues
+barplot(res$eig[,2],names=paste("Dim",1:nrow(res$eig))) 
+# Display only variables with good representation
+graph.var (res, draw=c("var","Points"), label=c("var","Points"), lim.cos2.var=0.5, new.plot=TRUE,cex=0.8,col.sup="blue",col.var="red")
+# Chart individuals / variables from the results of the Principal Component Analysis (PCA).
+fviz_pca_biplot(res,label="var",col.ind="cos2",col.var="red",habillage=data.train.cleaned$classe) + theme_minimal()
+
+```
+
+According to the decrease of the eigenvalues, we could retain the 6th axes. 
+We can see in the 1st factorial plan (axes 1 and 2), the best represented variables (for exemple accel_belt_y and accel_belt_z which seems to be negatively correlated...).
+But in the Chart individuals/variables we can identify 5 groups of individuals but these groups don't correspond to the 5 ways to do exercices (Class A to Class E) !
+So we suspect non linear correlations between factors. 
+MCA could capture non linear correlations but we'll have to discretize all variables.
+According to these results, i don't opt for linear models even if we could try to tranform variables. I choose to test Random Forests,Boosting methods and compare them to Linear Discriminant Analysis which serves as a reference.
+
+## 6. Preprocessing and Predictions with LDA, Random Forest and Boosting
+
+We normalize the variables and run LDA, Random Forests and Boosting algorithms and compare their confusion matrix to select the best model. 
+
+```{r, message=FALSE, warning=FALSE}
+
+# Normalizing the training dataset variables
+train <- train[complete.cases(train),]
+classe <- train$classe
+classe <- as.data.frame(classe)
+train <- scale(train[,-53])
+train <- as.data.frame(train)
+train <- cbind(train,classe)
+
+# Normalizing the test dataset variables
+test <- test[complete.cases(test),]
+classe <- test$classe
+test <- as.data.frame(test)
+test <- scale(test[,-53])
+test <- as.data.frame(test)
+test <- cbind(test,classe)
+
+# Normalizing the test dataset variables
+validation <- data.validation.cleaned[complete.cases(data.validation.cleaned),]
+problem_id <- validation$problem_id
+validation <- as.data.frame(validation)
+validation <- scale(validation[,-53])
+validation <- as.data.frame(validation)
+validation <- cbind(validation,problem_id)
+
+# Predicting with LDA (Linear Discriminant Analysis) --> 67%
+modelFitLDA <- train(train$classe ~.,method="lda",data=train)
+confusionMatrix(test$classe,predict(modelFitLDA,test))
+
+# Predicting with Random Forests
+modFitRF <- randomForest(classe ~. , data=train)
+predictionsRF <- predict(modFitRF, test, type = "class")
+confusionMatrix(predictionsRF, test$classe)
+
+# Predicting with Boosting
+modFitBoo <- train(classe ~. , method="gbm",data=train,verbose=FALSE)
+predictionsBoo <- predict(modFitBoo, test, type = "raw")
+confusionMatrix(predictionsBoo, test$classe)
+```
+
+## 7. Results
+
+Finally, Random Forests algorithm seems to offer the best results (96% of accuracy versus 87% for Boosting and 67% for LDA). We could more optimize them but the accuracy of Random Forests : 96% is already efficient.  
+
+We will apply this algorithm to our validation set and create the document to submit.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Predict the class of the validation set
+result<-predict(modFitRF,validation[,-53])
+result
+
+# code as suggested by Coursera
+pml_write_files = function(x){
+    n = length(x)
+    for(i in 1:n){
+        filename = paste0("problem_id_",i,".txt")
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
+pml_write_files(result)
+```
+
+
+
